@@ -508,6 +508,7 @@ transmitter_la_LDFLAGS = -module -avoid-version
 transmitter_la_CFLAGS =				\
 	$(COMPOSITOR_CFLAGS)			\
 	$(AM_CFLAGS)
+	$(WALTHAM_CFLAGS)
 transmitter_la_LIBADD = $(COMPOSITOR_LIBS)
 transmitter_la_SOURCES =			\
 	transmitter/plugin.c			\
