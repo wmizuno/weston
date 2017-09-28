@@ -32,22 +32,94 @@
  */
 
 #include <stdint.h>
+#include <wayland-client.h>
 
 #include "compositor.h"
 #include "transmitter_api.h"
+
+#include <waltham-client.h>
+
+#include <pthread.h>
+
+struct waltham_display;
+
+enum wthp_seat_capability {
+	/**
+	 * the seat has pointer devices
+	 */
+	WTHP_SEAT_CAPABILITY_POINTER = 1,
+	/**
+	 * the seat has one or more keyboards
+	 */
+	WTHP_SEAT_CAPABILITY_KEYBOARD = 2,
+	/**
+	 * the seat has touch devices
+	 */
+	WTHP_SEAT_CAPABILITY_TOUCH = 4,
+};
+
+/* epoll structure */
+struct watch { 
+	struct waltham_display *display;
+	int fd;
+	void (*cb)(struct watch *w, uint32_t events);
+};
+
+struct waltham_display {
+	struct wth_connection *connection;
+	struct watch conn_watch;
+	struct wth_display *display;
+
+	bool running;
+	int epoll_fd;
+
+	struct wthp_registry *registry;
+
+	struct wthp_callback *bling;
+
+	struct wthp_compositor *compositor;
+	struct wthp_blob_factory *blob_factory;
+	struct wthp_seat *seat;
+	struct wthp_pointer *pointer;
+	struct wthp_keyboard *keyboard;
+	struct wthp_touch *touch;
+	struct wtimer *fiddle_timer;
+
+	struct weston_transmitter_remote *remote;
+	char *addr;
+	char *port;
+
+	pthread_mutex_t mutex;
+};
+
+/* a timerfd based timer */
+struct wtimer {
+	struct watch watch;
+	void (*func)(struct wtimer *, void *);
+	void *data;
+};
 
 struct weston_transmitter {
 	struct weston_compositor *compositor;
 	struct wl_listener compositor_destroy_listener;
 
 	struct wl_list remote_list; /* transmitter_remote::link */
+
+	struct wl_listener stream_listener;
+	struct wl_signal connected_signal;
+
+	pthread_mutex_t txr_mutex;
+	int epoll_fd;
 };
 
 struct weston_transmitter_remote {
 	struct weston_transmitter *transmitter;
 	struct wl_list link;
-
+	char *model;
 	char *addr;
+	char *port;
+	int32_t width;
+	int32_t height;
 
 	enum weston_transmitter_connection_status status;
 	struct wl_signal connection_status_signal;
@@ -56,8 +128,9 @@ struct weston_transmitter_remote {
 	struct wl_list surface_list; /* weston_transmitter_surface::link */
 	struct wl_list seat_list; /* weston_transmitter_seat::link */
 
-	struct wl_event_source *conn_timer; /* fake */
+	struct waltham_display *display; /* waltham */
 };
+
 
 struct weston_transmitter_surface {
 	struct weston_transmitter_remote *remote;
@@ -71,19 +144,20 @@ struct weston_transmitter_surface {
 	struct wl_listener surface_destroy_listener;
 	struct wl_listener apply_state_listener;
 
-	weston_transmitter_ivi_resize_handler_t resize_handler;
 	void *resize_handler_data;
 
 	struct weston_output *sync_output;
 	struct wl_listener sync_output_destroy_listener;
 
-	struct wl_event_source *map_timer; /* fake */
-	struct wl_event_source *frame_timer; /* fake */
-
 	int32_t attach_dx; /**< wl_surface.attach(buffer, dx, dy) */
 	int32_t attach_dy; /**< wl_surface.attach(buffer, dx, dy) */
 	struct wl_list frame_callback_list; /* weston_frame_callback::link */
 	struct wl_list feedback_list; /* weston_presentation_feedback::link */
+
+	/* waltham */
+	struct wthp_surface *wthp_surf;
+	struct wthp_blob_factory *wthp_blob;
+	struct wthp_buffer *wthp_buf;
 };
 
 struct weston_transmitter_output_info {
@@ -103,12 +177,28 @@ struct weston_transmitter_output_info {
 struct weston_transmitter_output {
 	struct weston_output base;
 
+	struct {
+		bool draw_initial_frame;
+		struct wl_surface *surface;
+		struct wl_output *output;
+		struct wl_display *display;
+		int configure_width, configure_height;
+		bool wait_for_configure;
+	} parent;
+
 	struct weston_transmitter_remote *remote;
 	struct wl_list link; /* weston_transmitter_remote::output_list */
+
+	struct frame *frame;
+
+	struct wl_callback *frame_cb;
+	struct wl_listener frame_listener;
+
+	bool from_frame_signal;
 };
 
 struct weston_transmitter_seat {
-	struct weston_seat base;
+	struct weston_seat *base;
 	struct wl_list link;
 
 	/* pointer */
@@ -124,13 +214,11 @@ struct weston_transmitter_seat {
 	double pointer_phase; /* fake */
 
 	/* keyboard */
+	struct weston_transmitter_surface *keyboard_focus;
 
 	/* touch */
+	struct weston_transmitter_surface *touch_focus;
 };
-
-void
-transmitter_surface_ivi_resize(struct weston_transmitter_surface *txs,
-			       int32_t width, int32_t height);
 
 int
 transmitter_remote_create_output(struct weston_transmitter_remote *remote,
@@ -202,6 +290,15 @@ transmitter_seat_pointer_axis_discrete(struct weston_transmitter_seat *seat,
 int
 transmitter_seat_fake_pointer_input(struct weston_transmitter_seat *seat,
 				    struct weston_transmitter_surface *txs);
+
+void
+seat_capabilities(struct wthp_seat *wthp_seat,
+                  enum wthp_seat_capability caps);
+
+static const struct wthp_seat_listener seat_listener = {
+	seat_capabilities,
+	NULL
+};
 
 
 #endif /* WESTON_TRANSMITTER_PLUGIN_H */

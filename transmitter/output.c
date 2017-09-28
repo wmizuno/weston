@@ -73,7 +73,7 @@ make_model(struct weston_transmitter_remote *remote, int name)
 {
 	char *str;
 
-	if (asprintf(&str, "transmitter-%s-%d", remote->addr, name) < 0)
+	if (asprintf(&str, "transmitter-%s:%s-%d", remote->addr, remote->port, name) < 0)
 		return NULL;
 
 	return str;
@@ -124,8 +124,6 @@ free_mode_list(struct wl_list *mode_list)
 void
 transmitter_output_destroy(struct weston_transmitter_output *output)
 {
-	weston_log("Transmitter destroying output '%s'\n", output->base.name);
-
 	wl_list_remove(&output->link);
 
 	free_mode_list(&output->base.mode_list);
@@ -145,31 +143,134 @@ transmitter_output_destroy_(struct weston_output *base)
 	transmitter_output_destroy(output);
 }
 
+
 static void
 transmitter_start_repaint_loop(struct weston_output *base)
 {
-	weston_log("%s(%s)\n", __func__, base->name);
+	struct timespec ts;
+	struct weston_transmitter_output *output = to_transmitter_output(base);
+
+	weston_compositor_read_presentation_clock(output->base.compositor, &ts);
+	weston_output_finish_frame(&output->base, &ts, 0);
+}
+
+static int
+transmitter_check_output(struct weston_transmitter_surface *txs,
+			 struct weston_compositor *compositor)
+{
+	struct weston_output *def_output = container_of(compositor->output_list.next,
+							struct weston_output, link);
+	struct weston_view *view;
+
+	wl_list_for_each_reverse(view, &compositor->view_list, link) {
+		if (view->output == def_output) {
+			if (view->surface == txs->surface)
+				return 1;
+		}
+	}
+
+	return 0;
 }
 
 static int
 transmitter_output_repaint(struct weston_output *base,
 			   pixman_region32_t *damage)
 {
-	weston_log("%s(%s)\n", __func__, base->name);
+	struct weston_transmitter_output* output = to_transmitter_output(base);
+	struct weston_transmitter_remote* remote = output->remote;
+	struct weston_transmitter* txr = remote->transmitter;
+	struct weston_transmitter_api* transmitter_api = 
+		weston_get_transmitter_api(txr->compositor);
+	struct weston_transmitter_surface* txs;
+	struct weston_compositor *compositor = base->compositor;
+	struct weston_view *view;
+	bool found_output = false;
 
-	return -1;
+	if (!output->from_frame_signal)
+		return 0;
+
+	output->from_frame_signal = false;
+
+	/* 
+	 * Pick up weston_view in transmitter_output and check weston_view's surface
+	 * If the surface hasn't been conbined to weston_transmitter_surface, 
+	 * then call push_to_remote.
+	 * If the surface has already been combined, call gather_state.
+	 */
+	if (wl_list_empty(&compositor->view_list))
+		goto out;
+
+	wl_list_for_each_reverse(view, &compositor->view_list, link) {
+		bool found_surface = false;
+		if (view->output == &output->base) {
+			found_output = true;
+			wl_list_for_each(txs, &remote->surface_list, link) {
+				if (txs->surface == view->surface) {
+					found_surface = true;
+					if (!transmitter_check_output(txs, compositor))
+						break;
+
+					if (!txs->wthp_surf)
+						transmitter_api->surface_push_to_remote
+							(view->surface, remote, NULL);
+					transmitter_api->surface_gather_state(txs);
+					break;
+				}
+			}
+			if (!found_surface)
+				transmitter_api->surface_push_to_remote(view->surface, 
+									remote, NULL);
+		}
+	}
+	if (!found_output)
+		goto out;
+
+	return 0;
+
+out:
+	transmitter_start_repaint_loop(base);
+
+	return 0;
+}
+
+static void
+transmitter_output_enable(struct weston_output *base)
+{
+	struct weston_transmitter_output *output = to_transmitter_output(base);
+
+	
+	output->base.assign_planes = NULL;
+	output->base.set_backlight = NULL;
+	output->base.set_dpms = NULL;
+	output->base.switch_mode = NULL;
+}
+
+static void
+transmitter_output_frame_handler(struct wl_listener *listener, void *data)
+{
+	struct weston_transmitter_output *output;
+	int ret;
+
+	output = container_of(listener, struct weston_transmitter_output,
+			      frame_listener);
+	output->from_frame_signal = true;
+
+	ret = transmitter_output_repaint(&output->base, NULL);
 }
 
 int
-transmitter_remote_create_output(
-	struct weston_transmitter_remote *remote,
-	const struct weston_transmitter_output_info *info)
+transmitter_remote_create_output(struct weston_transmitter_remote *remote,
+				 const struct weston_transmitter_output_info *info)
 {
 	struct weston_transmitter_output *output;
+	struct weston_transmitter *txr = remote->transmitter;
+	struct weston_output *def_output;
 
 	output = zalloc(sizeof *output);
 	if (!output)
 		return -1;
+
+	output->parent.draw_initial_frame = true;
 
 	output->base.subpixel = info->subpixel;
 
@@ -177,14 +278,15 @@ transmitter_remote_create_output(
 	output->base.make = strdup(WESTON_TRANSMITTER_OUTPUT_MAKE);
 	output->base.model = make_model(remote, 1);
 	output->base.serial_number = strdup("0");
-
+	/* x and y is fake value */
 	wl_list_init(&output->base.mode_list);
 	if (make_mode_list(&output->base.mode_list, info) < 0)
 		goto fail;
 
 	output->base.current_mode = get_current_mode(&output->base.mode_list);
+	output->base.height = output->base.current_mode->height;
+	output->base.width = output->base.current_mode->width;
 	/* WL_OUTPUT_MODE_CURRENT already set */
-
 	weston_output_init(&output->base, remote->transmitter->compositor);
 
 	/*
@@ -200,7 +302,7 @@ transmitter_remote_create_output(
 	 * for this output, since we must not involve input device management
 	 * or color management or any kind of local management.
 	 */
-
+	output->base.enable = transmitter_output_enable;
 	output->base.start_repaint_loop = transmitter_start_repaint_loop;
 	output->base.repaint = transmitter_output_repaint;
 	output->base.destroy = transmitter_output_destroy_;
@@ -212,13 +314,19 @@ transmitter_remote_create_output(
 
 	output->base.native_mode = output->base.current_mode;
 	output->base.native_scale = output->base.current_scale;
+	output->base.scale = 1;
+	output->base.transform = WL_OUTPUT_TRANSFORM_NORMAL;
 
 	output->remote = remote;
 	wl_list_insert(&remote->output_list, &output->link);
 
-	weston_log("Transmitter created output '%s': %s, %s, %s\n",
-		   output->base.name, output->base.make, output->base.model,
-		   output->base.serial_number);
+	weston_output_enable(&output->base);
+
+	output->frame_listener.notify = transmitter_output_frame_handler;
+	def_output = container_of(txr->compositor->output_list.next,
+				  struct weston_output, link);
+	wl_signal_add(&def_output->frame_signal, &output->frame_listener);
+	output->from_frame_signal = false;
 
 	return 0;
 

@@ -306,6 +306,11 @@ westoninclude_HEADERS +=				\
 	ivi-shell/ivi-layout-export.h
 endif
 
+if ENABLE_SURFACE_REMOTING
+westoninclude_HEADERS +=				\
+	transmitter/transmitter_api.h
+endif
+
 if ENABLE_EGL
 libweston_module_LTLIBRARIES += gl-renderer.la
 gl_renderer_la_LDFLAGS = -module -avoid-version
@@ -507,9 +512,10 @@ module_LTLIBRARIES += transmitter.la
 transmitter_la_LDFLAGS = -module -avoid-version
 transmitter_la_CFLAGS =				\
 	$(COMPOSITOR_CFLAGS)			\
-	$(AM_CFLAGS)
+	$(AM_CFLAGS)				\
 	$(WALTHAM_CFLAGS)
-transmitter_la_LIBADD = $(COMPOSITOR_LIBS)
+transmitter_la_LIBADD = $(COMPOSITOR_LIBS) \
+			-lwaltham
 transmitter_la_SOURCES =			\
 	transmitter/plugin.c			\
 	transmitter/plugin.h			\
