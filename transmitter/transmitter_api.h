@@ -215,6 +215,51 @@ weston_get_transmitter_api(struct weston_compositor *compositor)
 				     sizeof(struct weston_transmitter_api));
 }
 
+#define WESTON_TRANSMITTER_IVI_API_NAME "transmitter_ivi_v1"
+
+/** For relaying configure events from Transmitter to shell. */
+typedef void (*weston_transmitter_ivi_resize_handler_t)(void *data,
+							int32_t width,
+							int32_t height);
+
+/** The Transmitter IVI-shell API
+ *
+ * Contains the IVI-shell specifics required to remote an ivi-surface.
+ */
+struct weston_transmitter_ivi_api {
+	/** Set IVI-id for a transmitter surface
+	 *
+	 * \param txs The transmitted surface.
+	 * \param ivi_id The IVI-surface id as specified by the
+	 * ivi_application.surface_create request.
+	 */
+	void
+	(*set_ivi_id)(struct weston_transmitter_surface *txs, uint32_t ivi_id);
+
+	/** Set callback to relay configure events.
+	 *
+	 * \param txs The transmitted surface.
+	 * \param cb The callback function pointer.
+	 * \param data User data to be passed to the callback.
+	 *
+	 * The arguments to the callback function are user data, and width and
+	 * height from the configure event from the remote compositor. The
+	 * shell must relay this event to the application.
+	 */
+	void
+	(*set_resize_callback)(struct weston_transmitter_surface *txs,
+			       weston_transmitter_ivi_resize_handler_t cb,
+			       void *data);
+};
+
+static inline const struct weston_transmitter_ivi_api *
+weston_get_transmitter_ivi_api(struct weston_compositor *compositor)
+{
+	return weston_plugin_api_get(compositor,
+				     WESTON_TRANSMITTER_IVI_API_NAME,
+				     sizeof(struct weston_transmitter_ivi_api));
+}
+
 /** Identifies outputs created by the Transmitter by make */
 #define WESTON_TRANSMITTER_OUTPUT_MAKE "Weston-Transmitter"
 

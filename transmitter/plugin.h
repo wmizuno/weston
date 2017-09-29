@@ -36,6 +36,7 @@
 
 #include "compositor.h"
 #include "transmitter_api.h"
+#include "ivi-shell/ivi-layout-export.h"
 
 #include <waltham-client.h>
 
@@ -81,6 +82,7 @@ struct waltham_display {
 	struct wthp_pointer *pointer;
 	struct wthp_keyboard *keyboard;
 	struct wthp_touch *touch;
+        struct wthp_ivi_application *application;
 	struct wtimer *fiddle_timer;
 
 	struct weston_transmitter_remote *remote;
@@ -143,8 +145,9 @@ struct weston_transmitter_surface {
 
 	struct weston_surface *surface;
 	struct wl_listener surface_destroy_listener;
-	struct wl_listener apply_state_listener;
+	const struct ivi_layout_interface *lyt;
 
+	weston_transmitter_ivi_resize_handler_t resize_handler;
 	void *resize_handler_data;
 
 	struct weston_output *sync_output;
@@ -159,6 +162,8 @@ struct weston_transmitter_surface {
 	struct wthp_surface *wthp_surf;
 	struct wthp_blob_factory *wthp_blob;
 	struct wthp_buffer *wthp_buf;
+        struct wthp_ivi_surface *wthp_ivi_surface;
+        struct wthp_ivi_application *wthp_ivi_application;
 };
 
 struct weston_transmitter_output_info {
@@ -220,6 +225,28 @@ struct weston_transmitter_seat {
 	/* touch */
 	struct weston_transmitter_surface *touch_focus;
 };
+
+struct ivi_layout_surface {
+	struct wl_list link;	/* ivi_layout::surface_list */
+	struct wl_signal property_changed;
+	int32_t update_count;
+	uint32_t id_surface;
+
+	struct ivi_layout *layout;
+	struct weston_surface *surface;
+
+	struct ivi_layout_surface_properties prop;
+
+	struct {
+		struct ivi_layout_surface_properties prop;
+	} pending;
+
+	struct wl_list view_list;	/* ivi_layout_view::surf_link */
+};
+
+void
+transmitter_surface_ivi_resize(struct weston_transmitter_surface *txs,
+			       int32_t width, int32_t height);
 
 int
 transmitter_remote_create_output(struct weston_transmitter_remote *remote,

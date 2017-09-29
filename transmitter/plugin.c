@@ -37,6 +37,8 @@
 #include "compositor/weston.h"
 #include "plugin.h"
 #include "transmitter_api.h"
+#include "plugin-registry.h"
+#include "ivi-shell/ivi-layout-export.h"
 
 /* waltham */
 #include <errno.h>
@@ -54,6 +56,33 @@
  * comment, containing the word "fake" are mockups that need to be
  * removed from the final implementation.
  */
+
+/** Send configure event through ivi-shell.
+ *
+ * \param txs The Transmitter surface.
+ * \param width Suggestion for surface width.
+ * \param height Suggestion for surface height.
+ *
+ * When the networking code receives a ivi_surface.configure event, it calls
+ * this function to relay it to the application.
+ *
+ * \c txs cannot be a zombie, because transmitter_surface_zombify() must
+ * tear down the network link, so a zombie cannot receive events.
+ */
+void
+transmitter_surface_ivi_resize(struct weston_transmitter_surface *txs,
+			       int32_t width, int32_t height)
+{
+	assert(txs->resize_handler);
+	if (!txs->resize_handler)
+		return;
+
+	assert(txs->surface);
+	if (!txs->surface)
+		return;
+
+	txs->resize_handler(txs->resize_handler_data, width, height);
+}
 
 static void
 transmitter_surface_configure(struct weston_transmitter_surface *txs,
@@ -154,6 +183,8 @@ transmitter_surface_zombify(struct weston_transmitter_surface *txs)
 		weston_log("remote->compositor is NULL\n");
 	if (txs->wthp_surf)
 		wthp_surface_destroy(txs->wthp_surf);
+	if (txs->wthp_ivi_surface)
+		wthp_ivi_surface_destroy(txs->wthp_ivi_surface);
 
 	/* In case called from destroy_transmitter() */
 	txs->remote = NULL;
@@ -195,11 +226,57 @@ sync_output_destroy_handler(struct wl_listener *listener, void *data)
 	weston_surface_force_output(txs->surface, NULL);
 }
 
+static void
+transmitter_surface_set_ivi_id(struct weston_transmitter_surface *txs)
+{
+        struct weston_transmitter_remote *remote = txs->remote;
+	struct waltham_display *dpy = remote->display;
+	struct weston_surface *ws;
+	struct ivi_layout_surface **pp_surface = NULL;
+	struct ivi_layout_surface *ivi_surf = NULL;
+	int32_t surface_length = 0;
+	int32_t ret = 0;
+	int32_t i = 0;
+
+	ret = txs->lyt->get_surfaces(&surface_length, &pp_surface);
+	if(!ret)
+		weston_log("No ivi_surface\n");
+
+	ws = txs->surface;
+
+	for(i = 0; i < surface_length; i++) {
+		ivi_surf = pp_surface[i];
+		if (ivi_surf->surface == ws) {
+			assert(txs->surface);
+			if (!txs->surface)
+				return;
+			if(!dpy)
+				weston_log("no content in waltham_display\n");
+			if(!dpy->compositor)
+				weston_log("no content in compositor object\n");
+			if(!dpy->seat)
+				weston_log("no content in seat object\n");
+			if(!dpy->application)
+				weston_log("no content in ivi-application object\n");
+			
+			txs->wthp_ivi_surface = wthp_ivi_application_surface_create
+				(dpy->application, ivi_surf->id_surface,  txs->wthp_surf);
+			weston_log("surface ID %d\n", ivi_surf->id_surface);
+			if(!txs->wthp_ivi_surface){
+				weston_log("Failed to create txs->ivi_surf\n");
+			}
+		}
+	}
+	free(pp_surface);
+	pp_surface = NULL;
+}
+
 static struct weston_transmitter_surface *
 transmitter_surface_push_to_remote(struct weston_surface *ws,
 				   struct weston_transmitter_remote *remote,
 				   struct wl_listener *stream_status)
 {
+	struct weston_transmitter *txr = remote->transmitter;
 	struct weston_transmitter_surface *txs;
 	bool found = false;
 
@@ -238,6 +315,9 @@ transmitter_surface_push_to_remote(struct weston_surface *ws,
 
 		wl_list_init(&txs->frame_callback_list);
 		wl_list_init(&txs->feedback_list);
+
+		txs->lyt = weston_plugin_api_get(txr->compositor, 
+						 IVI_LAYOUT_API_NAME, sizeof(txs->lyt));
 	}
 
 	/* TODO: create the content stream connection... */
@@ -246,6 +326,7 @@ transmitter_surface_push_to_remote(struct weston_surface *ws,
 	if (!txs->wthp_surf) {
 		weston_log("txs->wthp_surf is NULL\n");
 		txs->wthp_surf = wthp_compositor_create_surface(remote->display->compositor);
+		transmitter_surface_set_ivi_id(txs);
 	}
 
 	return txs;
@@ -284,6 +365,9 @@ registry_handle_global(struct wthp_registry *registry,
 		assert(!dpy->seat); 
 		dpy->seat = (struct wthp_seat *)wthp_registry_bind(registry, name, interface, 1);
 		wthp_seat_set_listener(dpy->seat, &seat_listener, dpy);
+	} else if (strcmp(interface, "wthp_ivi_application") == 0) {
+	        assert(!dpy->application);
+		dpy->application = (struct wthp_ivi_application *)wthp_registry_bind(registry, name, interface, 1);
 	}
 }
 
@@ -535,6 +619,7 @@ init_globals(struct waltham_display *dpy)
 	dpy->compositor = NULL;
 	dpy->blob_factory = NULL;
 	dpy->seat = NULL;
+	dpy->application = NULL;
 	dpy->pointer = NULL;
 	dpy->keyboard = NULL;
 	dpy->touch = NULL;
@@ -546,7 +631,9 @@ disconnect_surface(struct weston_transmitter_remote *remote)
 	struct weston_transmitter_surface *txs;
 	wl_list_for_each(txs, &remote->surface_list, link)
 	{
+		free(txs->wthp_ivi_surface);
 		free(txs->wthp_surf);
+		txs->wthp_ivi_surface = NULL;
 		txs->wthp_surf = NULL;
 	}
 }
@@ -722,6 +809,20 @@ static const struct weston_transmitter_api transmitter_api_impl = {
 	transmitter_get_weston_surface,
 };
 
+static void
+transmitter_surface_set_resize_callback(
+	struct weston_transmitter_surface *txs,
+	weston_transmitter_ivi_resize_handler_t cb,
+	void *data)
+{
+	txs->resize_handler = cb;
+	txs->resize_handler_data = data;
+}
+
+static const struct weston_transmitter_ivi_api transmitter_ivi_api_impl = {
+	transmitter_surface_set_resize_callback,
+};
+
 static int
 transmitter_create_remote(struct weston_transmitter *txr,
 			  const char *model,
@@ -845,6 +946,15 @@ wet_module_init(struct weston_compositor *compositor, int *argc, char *argv[])
 					 sizeof(transmitter_api_impl));
 	if (ret < 0) {
 		weston_log("Fatal: Transmitter API registration failed.\n");
+		goto fail;
+	}
+
+	ret = weston_plugin_api_register(compositor,
+					 WESTON_TRANSMITTER_IVI_API_NAME,
+					 &transmitter_ivi_api_impl,
+					 sizeof(transmitter_ivi_api_impl));
+	if (ret < 0) {
+		weston_log("Fatal: Transmitter IVI API registration failed.\n");
 		goto fail;
 	}
 
