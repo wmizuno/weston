@@ -39,7 +39,6 @@
 
 #include <waltham-client.h>
 
-#include <pthread.h>
 
 struct waltham_display;
 
@@ -71,7 +70,6 @@ struct waltham_display {
 	struct wth_display *display;
 
 	bool running;
-	int epoll_fd;
 
 	struct wthp_registry *registry;
 
@@ -88,8 +86,6 @@ struct waltham_display {
 	struct weston_transmitter_remote *remote;
 	char *addr;
 	char *port;
-
-	pthread_mutex_t mutex;
 };
 
 /* a timerfd based timer */
@@ -107,9 +103,7 @@ struct weston_transmitter {
 
 	struct wl_listener stream_listener;
 	struct wl_signal connected_signal;
-
-	pthread_mutex_t txr_mutex;
-	int epoll_fd;
+	struct wl_event_loop *loop;
 };
 
 struct weston_transmitter_remote {
@@ -129,6 +123,7 @@ struct weston_transmitter_remote {
 	struct wl_list seat_list; /* weston_transmitter_seat::link */
 
 	struct waltham_display *display; /* waltham */
+	struct wl_event_source *source;
 };
 
 

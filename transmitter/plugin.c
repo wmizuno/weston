@@ -29,7 +29,6 @@
 #include <assert.h>
 #include <string.h>
 #include <linux/input.h>
-#include <pthread.h>
 
 #include "compositor.h"
 #include "helpers.h"
@@ -330,17 +329,6 @@ static const struct wthp_registry_listener registry_listener = {
 	registry_handle_global_remove
 };
 
-static int
-watch_ctl(struct watch *w, int op, uint32_t events)
-{
-	struct weston_transmitter *txr = w->display->remote->transmitter;
-	struct epoll_event ee;
-
-	ee.events = events;
-	ee.data.ptr = w;
-	return epoll_ctl(txr->epoll_fd, op, w->fd, &ee);
-}
-
 static void
 connection_handle_data(struct watch *w, uint32_t events)
 {
@@ -357,9 +345,6 @@ connection_handle_data(struct watch *w, uint32_t events)
 	if (events & EPOLLERR) {
 		weston_log("Connection errored out.\n");
 		dpy->running = false;
-		if (watch_ctl(&dpy->conn_watch, EPOLL_CTL_DEL, EPOLLIN | EPOLLOUT) < 0) {
-			return;
-		}
 
 		return;
 	}
@@ -369,10 +354,6 @@ connection_handle_data(struct watch *w, uint32_t events)
 		 * polling for writable as everything has been written.
 		 */
 		ret = wth_connection_flush(dpy->connection);
-		if (ret == 0)
-			watch_ctl(&dpy->conn_watch, EPOLL_CTL_MOD, EPOLLIN);
-		else if (ret < 0 && errno != EAGAIN)
-			dpy->running = false;
 	}
 
 	if (events & EPOLLIN) {
@@ -383,9 +364,7 @@ connection_handle_data(struct watch *w, uint32_t events)
 			perror("Connection read error\n");
 			dpy->running = false;
 			perror("EPOLL_CTL_DEL\n");
-			if (watch_ctl(&dpy->conn_watch, EPOLL_CTL_DEL, EPOLLIN | EPOLLOUT) < 0) {
-				return;
-			}
+
 			return;
 		}
 	}
@@ -399,77 +378,59 @@ connection_handle_data(struct watch *w, uint32_t events)
 }
 
 static void
-waltham_mainloop(void *data)
+waltham_mainloop(int fd, uint32_t mask, void *data)
 {
-	struct weston_transmitter *txr = data;
-	struct weston_transmitter_remote *remote;
-	struct epoll_event ee[MAX_EPOLL_WATCHES];
+	struct weston_transmitter_remote *remote = data;
 	struct watch *w;
 	int count;
 	int i;
 	int ret;
 	int running_display;
+	running_display = 0;
 
-	while (1) {
-		running_display = 0;
-		pthread_mutex_lock(&txr->txr_mutex);
-		wl_list_for_each(remote, &txr->remote_list, link) {
-			struct waltham_display *dpy = remote->display;
-			if (!dpy)
-				continue;
-			if (!dpy->connection)
-				continue;
-			if (!dpy->running)
-				continue;
-			running_display++;
-			/* Dispatch queued events. */
-			pthread_mutex_lock(&dpy->mutex);
-			ret = wth_connection_dispatch(dpy->connection);
-			if (ret < 0)
-				dpy->running = false;
-			if (!dpy->running)
-				continue;
-			pthread_mutex_unlock(&dpy->mutex);
-			/* Run any application idle tasks at this point. */
-			/* (nothing to run so far) */
+	struct waltham_display *dpy = remote->display;
+	w = &dpy->conn_watch;
+	if (!dpy)
+		goto not_running;
+	
+	if (!dpy->connection)
+		goto not_running;
+	
+	if (!dpy->running)
+		goto not_running;
+	
+	running_display++;
+	/* Dispatch queued events. */
+	
+	ret = wth_connection_dispatch(dpy->connection);
+	if (ret < 0)
+		dpy->running = false;
+	if (!dpy->running)
+		goto not_running;
 
-			/* Flush out buffered requests. If the Waltham socket is
-			 * full, poll it for writable too, and continue flushing then.
-			 */
-			pthread_mutex_lock(&dpy->mutex);
-			ret = wth_connection_flush(dpy->connection);
-			if (ret < 0 && errno == EAGAIN) {
-				watch_ctl(&dpy->conn_watch, EPOLL_CTL_MOD, EPOLLIN | EPOLLOUT);
-			} else if (ret < 0) {
-				perror("Connection flush failed");
-				pthread_mutex_unlock(&dpy->mutex);
-				break;
-			}
-			pthread_mutex_unlock(&dpy->mutex);
-		}
-		pthread_mutex_unlock(&txr->txr_mutex);
+	/* Run any application idle tasks at this point. */
+	/* (nothing to run so far) */
+	
+	/* Flush out buffered requests. If the Waltham socket is
+	 * full, poll it for writable too, and continue flushing then.
+	 */
+	ret = wth_connection_flush(dpy->connection);
 
-		if (0 < running_display) {
-			/* Wait for events or signals */
-			count = epoll_wait(txr->epoll_fd,
-					   ee, ARRAY_LENGTH(ee), -1);
-			if (count < 0 && errno != EINTR) {
-				perror("Error with epoll_wait");
-				break;
-			}
-
-			/* Waltham events only read in the callback, not dispatched,
-			 * if the Waltham socket signalled readable. If it signalled
-			 * writable, flush more. See connection_handle_data().
-			 */
-			for (i = 0; i < count; i++) {
-				w = ee[i].data.ptr;
-				pthread_mutex_lock(&w->display->mutex);
-				w->cb(w, ee[i].events);
-				pthread_mutex_unlock(&w->display->mutex);
-			}
-		}
+	if (0 < running_display) {
+		/* Waltham events only read in the callback, not dispatched,
+		 * if the Waltham socket signalled readable. If it signalled
+		 * writable, flush more. See connection_handle_data().
+		 */
+		w->cb(w, mask);
 	}
+	wl_event_source_remove(remote->source);
+	remote->source = wl_event_loop_add_fd(remote->transmitter->loop,
+					      remote->display->conn_watch.fd,
+					      WL_EVENT_READABLE, 
+					      waltham_mainloop, remote);
+
+not_running:
+	;
 }
 
 /* A one-off asynchronous open-coded roundtrip handler. */
@@ -488,8 +449,6 @@ static const struct wthp_callback_listener bling_listener = {
 static int
 waltham_client_init(struct waltham_display *dpy)
 {
-	pthread_mutex_init(&dpy->mutex, NULL);
-
 	if (!dpy)
 		return -1;
 	/*
@@ -503,19 +462,10 @@ waltham_client_init(struct waltham_display *dpy)
 		dpy->remote->status = WESTON_TRANSMITTER_CONNECTION_READY;
 		wl_signal_emit(&dpy->remote->connection_status_signal, dpy->remote);
 	}
-	dpy->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
-	if (dpy->epoll_fd == -1) {
-		perror("Error on epoll_create1");
-		return -1;
-	}
 
 	dpy->conn_watch.display = dpy;
 	dpy->conn_watch.cb = connection_handle_data;
 	dpy->conn_watch.fd = wth_connection_get_fd(dpy->connection);
-	if (watch_ctl(&dpy->conn_watch, EPOLL_CTL_ADD, EPOLLIN) < 0) {
-		perror("Error setting up connection polling");
-		return -1;
-	}
 
 	dpy->display = wth_connection_get_display(dpy->connection);
 	/* wth_display_set_listener() is already done by waltham, as
@@ -569,10 +519,7 @@ transmitter_connect_to_remote(struct weston_transmitter *txr)
 		}
 	}
 
-	pthread_t run_thread;
-	pthread_create(&run_thread, NULL, waltham_mainloop, txr);
 	return remote;
-
 }
 
 static enum weston_transmitter_connection_status
@@ -612,6 +559,8 @@ transmitter_remote_destroy(struct weston_transmitter_remote *remote)
 	free(remote->addr);
 	wl_list_remove(&remote->link);
 
+	wl_event_source_remove(remote->source);
+
 	free(remote);
 }
 
@@ -639,9 +588,7 @@ transmitter_compositor_destroyed(struct wl_listener *listener, void *data)
 	 * transmitter_remote_destroy() accessing freed memory if the shell
 	 * cleans up after Transmitter.
 	 */
-	pthread_mutex_lock(&txr->txr_mutex);
 	wl_list_remove(&txr->remote_list);
-	pthread_mutex_unlock(&txr->txr_mutex);
 
 	free(txr);
 }
@@ -772,16 +719,20 @@ static void
 transmitter_post_init(void *data)
 {
 	struct weston_transmitter *txr = data;
-
+	struct weston_transmitter_remote *remote;
+	
 	if (!txr) {
 		weston_log("Transmitter disabled\n");
 	} else {
-		txr->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
-		if (txr->epoll_fd == -1)
-			perror("Error on epoll_create1");
-
 		transmitter_get_server_config(txr);
 		transmitter_connect_to_remote(txr);
+
+		wl_list_for_each(remote, &txr->remote_list, link) {
+			remote->source = wl_event_loop_add_fd(txr->loop,
+							   remote->display->conn_watch.fd,
+							   WL_EVENT_READABLE, 
+							   waltham_mainloop, remote);
+		}
 	}
 }
 
@@ -790,7 +741,6 @@ wet_module_init(struct weston_compositor *compositor, int *argc, char *argv[])
 {
 	struct weston_transmitter *txr;
 	int ret;
-	struct wl_event_loop *loop = NULL;
 
 	txr = zalloc(sizeof *txr);
 	if (!txr)
@@ -815,10 +765,8 @@ wet_module_init(struct weston_compositor *compositor, int *argc, char *argv[])
 
 	weston_log("Transmitter initialized.\n");
 
-	loop = wl_display_get_event_loop(compositor->wl_display);
-	wl_event_loop_add_idle(loop, transmitter_post_init, txr);
-
-	pthread_mutex_init(&txr->txr_mutex, NULL);
+	txr->loop = wl_display_get_event_loop(compositor->wl_display);
+	wl_event_loop_add_idle(txr->loop, transmitter_post_init, txr);
 
 	return 0;
 
