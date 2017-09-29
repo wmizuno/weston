@@ -47,6 +47,8 @@
 #include <waltham-connection.h>
 
 #define MAX_EPOLL_WATCHES 2
+#define ESTABLISH_CONNECTION_PERIOD 2000
+#define RETRY_CONNECTION_PERIOD 5000
 
 /* XXX: all functions and variables with a name, and things marked with a
  * comment, containing the word "fake" are mockups that need to be
@@ -80,41 +82,50 @@ static void
 transmitter_surface_gather_state(struct weston_transmitter_surface *txs)
 {
 	struct weston_transmitter_remote *remote = txs->remote;
-	/* TODO: transmit surface state to remote */
-	/* The buffer must be transmitted to remote side */
-	
-	/* waltham */
-	struct weston_surface *surf = txs->surface;
-	struct weston_compositor *comp = surf->compositor;
-	int32_t stride, data_sz, width, height;
-	void *data;
-	
-	width = 1;
-	height = 1;
-	stride = width * (PIXMAN_FORMAT_BPP(comp->read_format) / 8);
-	
-	data = malloc(stride * height);
-	data_sz = stride * height;
-	
-	/* fake sending buffer */
-	txs->wthp_buf = wthp_blob_factory_create_buffer(remote->display->blob_factory,
-							data_sz,
-							data,
-							surf->width,
-							surf->height,
-							stride,
-							PIXMAN_FORMAT_BPP(comp->read_format));
-	
-	wthp_buffer_set_listener(txs->wthp_buf, &buffer_listener, txs);
-	
-	wthp_surface_attach(txs->wthp_surf, txs->wthp_buf, txs->attach_dx, txs->attach_dy);
-	wthp_surface_damage(txs->wthp_surf, txs->attach_dx, txs->attach_dy, surf->width, surf->height);
-	wthp_surface_commit(txs->wthp_surf);
-	
-	wth_connection_flush(remote->display->connection);
-	
-	txs->attach_dx = 0;
-	txs->attach_dy = 0;
+	struct waltham_display *dpy = remote->display;
+	if(!dpy->running) {
+		if(remote->status != WESTON_TRANSMITTER_CONNECTION_DISCONNECTED) {
+			remote->status = WESTON_TRANSMITTER_CONNECTION_DISCONNECTED;
+			wl_event_source_timer_update(remote->retry_timer, 1);
+		}
+	}
+	else {
+		/* TODO: transmit surface state to remote */
+		/* The buffer must be transmitted to remote side */
+		
+		/* waltham */
+		struct weston_surface *surf = txs->surface;
+		struct weston_compositor *comp = surf->compositor;
+		int32_t stride, data_sz, width, height;
+		void *data;
+		
+		width = 1;
+		height = 1;
+		stride = width * (PIXMAN_FORMAT_BPP(comp->read_format) / 8);
+		
+		data = malloc(stride * height);
+		data_sz = stride * height;
+		
+		/* fake sending buffer */
+		txs->wthp_buf = wthp_blob_factory_create_buffer(remote->display->blob_factory,
+								data_sz,
+								data,
+								surf->width,
+								surf->height,
+								stride,
+								PIXMAN_FORMAT_BPP(comp->read_format));
+		
+		wthp_buffer_set_listener(txs->wthp_buf, &buffer_listener, txs);
+		
+		wthp_surface_attach(txs->wthp_surf, txs->wthp_buf, txs->attach_dx, txs->attach_dy);
+		wthp_surface_damage(txs->wthp_surf, txs->attach_dx, txs->attach_dy, surf->width, surf->height);
+		wthp_surface_commit(txs->wthp_surf);
+		
+		wth_connection_flush(remote->display->connection);
+		
+		txs->attach_dx = 0;
+		txs->attach_dy = 0;
+	}
 }
 
 /** Mark the weston_transmitter_surface dead.
@@ -278,8 +289,11 @@ registry_handle_global(struct wthp_registry *registry,
 
 /* notify connection ready */
 static void
-conn_ready_notify(struct weston_transmitter_remote *remote)
+conn_ready_notify(struct wl_listener *l, void *data)
 {
+	struct weston_transmitter_remote *remote =
+	  container_of(l, struct weston_transmitter_remote, 
+		       establish_listener);
 	struct weston_transmitter_output_info info = {
 		WL_OUTPUT_SUBPIXEL_NONE,
 		WL_OUTPUT_TRANSFORM_NORMAL,
@@ -303,7 +317,6 @@ conn_ready_notify(struct weston_transmitter_remote *remote)
 	/* Outputs and seats are dynamic, do not guarantee they are all
 	 * present when signalling connection status.
 	 */
-
 	transmitter_remote_create_output(remote, &info);
 	transmitter_remote_create_seat(remote);
 }
@@ -499,12 +512,74 @@ waltham_client_init(struct waltham_display *dpy)
 	return 0;
 }
 
+static int
+establish_timer_handler(void *data)
+{
+	struct weston_transmitter_remote *remote = data;
+	int ret;
+
+	ret = waltham_client_init(remote->display);
+	if(ret == -2) {
+		wl_event_source_timer_update(remote->establish_timer, 
+					     ESTABLISH_CONNECTION_PERIOD);
+		return 0;
+	}
+	remote->status = WESTON_TRANSMITTER_CONNECTION_READY;
+	wl_signal_emit(&remote->connection_status_signal, remote);
+	return 0;
+}
+
+static void
+init_globals(struct waltham_display *dpy)
+{
+	dpy->compositor = NULL;
+	dpy->blob_factory = NULL;
+	dpy->seat = NULL;
+	dpy->pointer = NULL;
+	dpy->keyboard = NULL;
+	dpy->touch = NULL;
+}
+
+static void
+disconnect_surface(struct weston_transmitter_remote *remote)
+{
+	struct weston_transmitter_surface *txs;
+	wl_list_for_each(txs, &remote->surface_list, link)
+	{
+		free(txs->wthp_surf);
+		txs->wthp_surf = NULL;
+	}
+}
+
+static int
+retry_timer_handler(void *data)
+{
+	struct weston_transmitter_remote *remote = data;
+	struct waltham_display *dpy = remote->display;
+
+	if(!dpy->running)
+	{
+		registry_handle_global_remove(dpy->registry, 1);
+		init_globals(dpy);
+		disconnect_surface(remote);
+		wl_event_source_timer_update(remote->establish_timer, 
+					     ESTABLISH_CONNECTION_PERIOD);
+
+		return 0;
+	}
+	else
+		wl_event_source_timer_update(remote->retry_timer, 
+					     RETRY_CONNECTION_PERIOD);
+	return 0;
+}
+
 static struct weston_transmitter_remote *
 transmitter_connect_to_remote(struct weston_transmitter *txr)
 {
 	struct weston_transmitter_remote *remote;
+	struct wl_event_loop *loop_est, *loop_retry;
 	int ret;
-
+	
 	wl_list_for_each_reverse(remote, &txr->remote_list, link) {
 		/* XXX: actually start connecting */
 		/* waltham */
@@ -512,11 +587,20 @@ transmitter_connect_to_remote(struct weston_transmitter *txr)
 		if (!remote->display)
 			return NULL;
 		remote->display->remote = remote;
-		waltham_client_init(remote->display);
+		/* set connection establish timer */
+		loop_est = wl_display_get_event_loop(txr->compositor->wl_display);
+		remote->establish_timer = 
+			wl_event_loop_add_timer(loop_est, establish_timer_handler, remote);
+		wl_event_source_timer_update(remote->establish_timer, 1);
+		/* set connection retry timer */
+		loop_retry = wl_display_get_event_loop(txr->compositor->wl_display);
+		remote->retry_timer = 
+			wl_event_loop_add_timer(loop_retry, retry_timer_handler, remote);
 		if (ret < 0) {
 			weston_log("Fatal: Transmitter waltham connecting failed.\n");
 			return NULL;
 		}
+		wl_signal_emit(&remote->conn_establish_signal, NULL);
 	}
 
 	return remote;
@@ -664,8 +748,9 @@ transmitter_create_remote(struct weston_transmitter *txr,
 	wl_list_init(&remote->output_list);
 	wl_list_init(&remote->surface_list);
 	wl_list_init(&remote->seat_list);
-
-	conn_ready_notify(remote);
+	wl_signal_init(&remote->conn_establish_signal);
+	remote->establish_listener.notify = conn_ready_notify;
+	wl_signal_add(&remote->conn_establish_signal, &remote->establish_listener);
 
 	return 0;
 }

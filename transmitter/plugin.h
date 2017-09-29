@@ -117,10 +117,16 @@ struct weston_transmitter_remote {
 
 	enum weston_transmitter_connection_status status;
 	struct wl_signal connection_status_signal;
+        struct wl_signal conn_establish_signal;
 
 	struct wl_list output_list; /* weston_transmitter_output::link */
 	struct wl_list surface_list; /* weston_transmitter_surface::link */
 	struct wl_list seat_list; /* weston_transmitter_seat::link */
+
+        struct wl_listener establish_listener;
+
+        struct wl_event_source *establish_timer; /* for establish connection */
+	struct wl_event_source *retry_timer; /* for retry connection */
 
 	struct waltham_display *display; /* waltham */
 	struct wl_event_source *source;
