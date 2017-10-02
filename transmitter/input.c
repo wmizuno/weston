@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2016 DENSO CORPORATION
+ * Copyright (C) 2017 Advanced Driver Information Technology GmbH, Advanced Driver Information Technology Corporation, Robert Bosch GmbH, Robert Bosch Car Multimedia GmbH, DENSO Corporation
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
