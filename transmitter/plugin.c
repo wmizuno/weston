@@ -113,6 +113,7 @@ transmitter_surface_gather_state(struct weston_transmitter_surface *txs)
 {
 	struct weston_transmitter_remote *remote = txs->remote;
 	struct waltham_display *dpy = remote->display;
+
 	if(!dpy->running) {
 		if(remote->status != WESTON_TRANSMITTER_CONNECTION_DISCONNECTED) {
 			remote->status = WESTON_TRANSMITTER_CONNECTION_DISCONNECTED;
@@ -126,31 +127,41 @@ transmitter_surface_gather_state(struct weston_transmitter_surface *txs)
 		/* waltham */
 		struct weston_surface *surf = txs->surface;
 		struct weston_compositor *comp = surf->compositor;
-		int32_t stride, data_sz, width, height;
-		void *data;
-		
-		width = 1;
-		height = 1;
+		int32_t width = 100;
+		int32_t height = 100;
+		int32_t stride;
+		int ret = 0;
+		void *pixels;
+
+//		stride = surf->width * (PIXMAN_FORMAT_BPP(comp->read_format) / 8);
 		stride = width * (PIXMAN_FORMAT_BPP(comp->read_format) / 8);
+//		weston_log("width  %d\n", surf->width);
+//		weston_log("height %d\n", surf->height);
+//		weston_log("stride %d\n", stride);
+		pixels = malloc(stride * height);
 		
-		data = malloc(stride * height);
-		data_sz = stride * height;
-		
+		ret = weston_surface_copy_content(surf, pixels,
+						  (stride * height), 0, 0,
+						  width, height);
+		if(ret < 0)
+			fprintf(stderr, "failed to get surface content\n");
+
 		/* fake sending buffer */
 		txs->wthp_buf = wthp_blob_factory_create_buffer(remote->display->blob_factory,
-								data_sz,
-								data,
-								surf->width,
-								surf->height,
+								(stride * height),
+								pixels,
+								width,
+								height,
 								stride,
 								PIXMAN_FORMAT_BPP(comp->read_format));
 		
 		wthp_buffer_set_listener(txs->wthp_buf, &buffer_listener, txs);
 		
 		wthp_surface_attach(txs->wthp_surf, txs->wthp_buf, txs->attach_dx, txs->attach_dy);
-		wthp_surface_damage(txs->wthp_surf, txs->attach_dx, txs->attach_dy, surf->width, surf->height);
+		//wthp_surface_damage(txs->wthp_surf, txs->attach_dx, txs->attach_dy, surf->width, surf->height);
+		wthp_surface_damage(txs->wthp_surf, txs->attach_dx, txs->attach_dy, width, height);
 		wthp_surface_commit(txs->wthp_surf);
-		
+
 		wth_connection_flush(remote->display->connection);
 		
 		txs->attach_dx = 0;
