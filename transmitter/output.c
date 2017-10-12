@@ -239,7 +239,7 @@ transmitter_output_enable(struct weston_output *base)
 {
 	struct weston_transmitter_output *output = to_transmitter_output(base);
 
-	
+	output->base.output_type = OUTPUT_WALTHAM;
 	output->base.assign_planes = NULL;
 	output->base.set_backlight = NULL;
 	output->base.set_dpms = NULL;
